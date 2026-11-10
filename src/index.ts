@@ -808,6 +808,8 @@ export default {
       },
     ]
     // 真实 webServer.register 只接受单个 route(数组会被静默塞进前缀表导致路由失效)
-    for (const route of routes) ctx.webServer.register(route)
+    // 注意:必须把返回的 disposer 挂到 ctx.on('dispose'),否则插件被禁用/热重载时路由留在
+    // webserver 里,再次启用就会报 duplicate exact route —— 这是本插件之前热重载不了的根因。
+    for (const route of routes) ctx.effect(() => ctx.webServer.register(route))
   },
 }

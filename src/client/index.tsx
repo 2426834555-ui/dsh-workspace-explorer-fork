@@ -581,6 +581,17 @@ function Panel(props: {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
   const [filter, setFilter] = useState('')
   const [preview, setPreview] = useState<{ entry: WsEntry; loading: boolean; data: PeekResult | null; error: string | null; page: number; mode: 'preview' | 'edit'; editContent: string; dirty: boolean; saving: boolean; saveError: string | null } | null>(null)
+  // 打开文件后是否直接进编辑态（localStorage: dshwe.prefs.autoEdit，默认开）
+  const autoEditRef = useRef(true)
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem('dshwe.prefs')
+      const saved = raw ? JSON.parse(raw) : {}
+      autoEditRef.current = saved.autoEdit !== false
+    } catch {
+      autoEditRef.current = true
+    }
+  }, [])
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [selAnchor, setSelAnchor] = useState<string | null>(null)
   const [tab, setTab] = useState<'files' | 'settings'>('files')
@@ -764,7 +775,11 @@ function Panel(props: {
       }))
     }
   }, [root, c.peekLines])
-  const openPreview = (entry: WsEntry): void => { void loadPreviewPage(entry, 0) }
+  const openPreview = async (entry: WsEntry): Promise<void> => {
+    await loadPreviewPage(entry, 0)
+    if (!autoEditRef.current || entry.type === 'directory') return
+    await enterEditMode()
+  }
   const previewPrev = (): void => { if (preview && preview.page > 0 && !preview.loading) void loadPreviewPage(preview.entry, preview.page - 1) }
   const previewNext = (): void => { if (preview && preview.data?.hasMore && !preview.loading) void loadPreviewPage(preview.entry, preview.page + 1) }
   // 「插入内容」:小文件(≤32KB)整文件取回
@@ -1140,6 +1155,12 @@ function Panel(props: {
       contentArea = (
         <textarea className={C('dshwe-editor')} value={preview.editContent}
           onChange={(e) => updateEditContent(e.target.value)}
+          onKeyDown={(ev) => {
+            if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 's') {
+              ev.preventDefault()
+              if (preview.dirty && !preview.saving) void saveFile()
+            }
+          }}
           spellCheck={false} />
       )
     } else {

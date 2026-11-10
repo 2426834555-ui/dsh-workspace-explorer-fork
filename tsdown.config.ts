@@ -11,7 +11,7 @@ import { basename, dirname, resolve as resolvePath, sep } from 'node:path'
 import type { UserConfig } from 'tsdown'
 import { transform } from 'lightningcss'
 
-const ID = '@jiyr0119/dsh-workspace-explorer'
+const ID = 'dsh-workspace-explorer'
 
 /** Loader module-table seed (mirror of apps/web platform.ts in DSH 0.2.0). */
 const PLATFORM_MODULES = [

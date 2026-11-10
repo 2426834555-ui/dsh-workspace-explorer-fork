@@ -542,7 +542,7 @@ function SettingsView() {
             <div className={C('dshwe-star-label')}>{tr('star.ask')}</div>
           </div>
           <a className={C('dshwe-star-link')}
-            href="https://github.com/Jiyr0119/dsh-workspace-explorer"
+            href="https://github.com/2426834555-ui/dsh-workspace-explorer-fork"
             target="_blank" rel="noreferrer">
             {tr('star.cta')}
           </a>

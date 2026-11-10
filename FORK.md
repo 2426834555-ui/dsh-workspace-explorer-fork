@@ -1,7 +1,32 @@
-# 本地 fork 说明（相对上游 @jiyr0119/dsh-workspace-explorer 0.10.0）
+# dsh-workspace-explorer-fork
 
-本仓库是 [Jiyr0119/dsh-workspace-explorer](https://github.com/Jiyr0119/dsh-workspace-explorer) 的个人 fork，
-只保留一个提交，改动集中在 `src/client/index.tsx`：
+> 这是**两个独立插件之二**。另一个是开发进程胶囊：[dsh-devproc](https://github.com/2426834555-ui/dsh-devproc)。
+> 两者互不依赖，各自克隆、各自安装；一起装才和作者的界面一致（胶囊在输入框上方，文件树在右侧面板）。
+
+基于上游 [Jiyr0119/dsh-workspace-explorer](https://github.com/Jiyr0119/dsh-workspace-explorer) 0.10.0 的 fork。
+
+## 安装（换电脑照抄）
+
+```powershell
+# 1) 克隆
+git clone https://github.com/2426834555-ui/dsh-workspace-explorer-fork.git "$HOME\.dsh\plugins\dsh-workspace-explorer-fork"
+
+# 2) 因为是 TS 源码仓库，要先装依赖并构建出 lib/
+cd "$HOME\.dsh\plugins\dsh-workspace-explorer-fork"
+npm install --legacy-peer-deps     # 或 pnpm install
+npm run build                      # 生成 lib/index.js + lib/client.js
+
+# 3) 装进 profile（包名仍是 dsh-workspace-explorer）
+cd "$HOME\.dsh\profiles\desktop"
+pnpm remove @jiyr0119/dsh-workspace-explorer   # 若装过原版
+pnpm add "dsh-workspace-explorer@link:../../plugins/dsh-workspace-explorer-fork"
+```
+
+然后在 `$HOME\.dsh\profiles\desktop\package.json` 的 `dsh.profile.bundles` 里把
+`"@jiyr0119/dsh-workspace-explorer"` 换成 `"dsh-workspace-explorer"`，重启 DSH。
+
+> 注意：`cordis.patch.yml` 里原本可能写着 `name: '@jiyr0119/dsh-workspace-explorer'`，
+> 需要同步改成 `dsh-workspace-explorer`，否则 profile 会去 npm 装回原版。
 
 ## 相对上游的改动
 

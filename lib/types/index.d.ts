@@ -14,6 +14,26 @@ export interface WsHttpResponse {
     writeHead(status: number, headers?: Record<string, string>): void;
     end(body?: string | Uint8Array): void;
 }
+/** 关联文件所属分组。 */
+export interface RelatedGroup {
+    kind: 'imports' | 'importedBy' | 'twin' | 'similar';
+    label: string;
+    items: Array<{
+        rel: string;
+        name: string;
+        reason: string;
+        score: number;
+    }>;
+}
+/** 关联分析结果。 */
+export interface RelatedResult {
+    ok: boolean;
+    error?: string;
+    target: string;
+    groups: RelatedGroup[];
+    scanned: number;
+    cached: boolean;
+}
 /** 一行目录条目。 */
 export interface WsEntry {
     name: string;

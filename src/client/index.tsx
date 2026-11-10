@@ -64,6 +64,10 @@ const DICTS: Record<string, Record<string, string>> = {
     'star.ask': '⭐ 顺手留颗 Star，作者能高兴一整天',
     'star.cta': '★ 给一颗 Star',
     'drawer.tip': '文件目录', 'drawer.open': '打开文件抽屉', 'drawer.label': '工作区文件',
+    'related.title': '别处可能也要改：{n} 处', 'related.loading': '正在找关联文件…', 'related.fail': '关联分析失败',
+    'related.none': '没找到别处有同样内容的文件', 'related.insert': '带上这 {n} 个', 'related.clear': '全不选',
+    'related.intro': '下面这几处可能也有同样要改的地方，一起看一下：',
+    'related.tip': '看哪些文件和它有引用/同构/相似关系（改一处时别处别漏）',
   },
   en: {
     'panel.title': 'Workspace Files', 'ws.current': 'Current dir', 'search.ph': 'Search file names or contents…',
@@ -102,6 +106,10 @@ const DICTS: Record<string, Record<string, string>> = {
     'star.ask': '⭐ Drop a Star if it helped — it makes the author\'s day',
     'star.cta': '★ Give a Star',
     'drawer.tip': 'Files', 'drawer.open': 'Open files drawer', 'drawer.label': 'Workspace Files',
+    'related.title': 'Also likely to change: {n}', 'related.loading': 'Looking for related files…', 'related.fail': 'Related scan failed',
+    'related.none': 'No other file looks like this one', 'related.insert': 'Take these {n}', 'related.clear': 'Clear all',
+    'related.intro': 'These files probably need the same change — check them too:',
+    'related.tip': 'Show files that import / twin / mirror this one (so a change in one place is not missed elsewhere)',
   },
 }
 
@@ -217,6 +225,10 @@ interface ConfigResult { ok: boolean; ignore?: string[]; max?: number; peekMaxLi
 /** 宿主内容搜索命中(/dsh-we/api/search)。 */
 interface SearchHit { rel: string; name: string; line: number; text: string; start: number; end: number }
 interface SearchResult { ok: boolean; error?: string; hits?: SearchHit[]; scanned?: number; truncated?: boolean }
+/** 关联文件(/dsh-we/api/related):改一处时,别处可能也要跟着改。 */
+interface RelatedItem { rel: string; name: string; reason: string; score: number }
+interface RelatedGroup { kind: 'imports' | 'importedBy' | 'twin' | 'similar'; label: string; items: RelatedItem[] }
+interface RelatedResult { ok: boolean; error?: string; target?: string; groups?: RelatedGroup[]; scanned?: number }
 /** 原生文件管理器能力/结果(/dsh-we/api/native)。 */
 interface NativeStatusResult { ok: boolean; fileManager?: string | null; error?: string }
 
@@ -581,6 +593,9 @@ function Panel(props: {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
   const [filter, setFilter] = useState('')
   const [preview, setPreview] = useState<{ entry: WsEntry; loading: boolean; data: PeekResult | null; error: string | null; page: number; mode: 'preview' | 'edit'; editContent: string; dirty: boolean; saving: boolean; saveError: string | null } | null>(null)
+  // 关联文件面板:改一处时提示别处可能也要改(选中后可一键带上引用)
+  const [related, setRelated] = useState<{ rel: string; loading: boolean; data: RelatedResult | null; error: string | null; open: boolean; sel: Set<string> } | null>(null)
+  const relatedSeq = useRef(0)
   // 打开文件后是否直接进编辑态（localStorage: dshwe.prefs.autoEdit，默认开）
   const autoEditRef = useRef(true)
   useEffect(() => {
@@ -707,7 +722,7 @@ function Panel(props: {
 
   useEffect(() => {
     if (root === null) return
-    setDirs({}); setExpanded({}); setPreview(null); setSelected(new Set()); setSelAnchor(null)
+    setDirs({}); setExpanded({}); setPreview(null); setRelated(null); setSelected(new Set()); setSelAnchor(null)
     void loadDir(root, '')
     // 同步工作区根目录给 @ 触发源
     setActiveRoot(root)
@@ -746,6 +761,49 @@ function Panel(props: {
     return type === 'directory' ? `@${p}/` : `@${p}`
   }
 
+  // 关联文件:「改这里的时候,别处是不是也有同样的地方没改」
+  const loadRelated = useCallback(async (entry: WsEntry): Promise<void> => {
+    if (root === null || entry.type === 'directory') { setRelated(null); return }
+    const seq = ++relatedSeq.current
+    setRelated({ rel: entry.rel, loading: true, data: null, error: null, open: false, sel: new Set() })
+    try {
+      const res = await api<RelatedResult>('related', { root, rel: entry.rel })
+      if (seq !== relatedSeq.current) return
+      if (!res.ok) {
+        setRelated({ rel: entry.rel, loading: false, data: null, error: res.error ?? 'unknown', open: false, sel: new Set() })
+        return
+      }
+      const all = new Set<string>()
+      for (const g of res.groups ?? []) for (const it of g.items) all.add(it.rel)
+      setRelated({ rel: entry.rel, loading: false, data: res, error: null, open: false, sel: all })
+    } catch (err) {
+      if (seq !== relatedSeq.current) return
+      setRelated({ rel: entry.rel, loading: false, data: null, error: String((err as Error)?.message ?? err), open: false, sel: new Set() })
+    }
+  }, [root])
+  const relatedCount = (): number => {
+    if (related === null || related.data === null) return 0
+    const seen = new Set<string>()
+    for (const g of related.data.groups ?? []) for (const it of g.items) seen.add(it.rel)
+    return seen.size
+  }
+  const toggleRelated = (rel: string): void => {
+    setRelated((prev) => {
+      if (prev === null) return prev
+      const sel = new Set(prev.sel)
+      if (sel.has(rel)) sel.delete(rel)
+      else sel.add(rel)
+      return { ...prev, sel }
+    })
+  }
+  const insertRelated = (): void => {
+    if (related === null || root === null || related.sel.size === 0) return
+    const b = getBridge()
+    if (b === null) return
+    const refs = [...related.sel].map((rel) => formatAtRef(rel, `${root.replace(/\/+$/, '')}/${rel}`, 'file'))
+    b.insert(`${tr('related.intro')}\n${refs.join('\n')}`)
+  }
+
   // 分页预览:按行加载第 page 页(每页 c.peekLines 行)
   const loadPreviewPage = useCallback(async (entry: WsEntry, page: number, keepMode = false): Promise<void> => {
     setPreview((prev) => ({
@@ -777,6 +835,7 @@ function Panel(props: {
   }, [root, c.peekLines])
   const openPreview = async (entry: WsEntry): Promise<void> => {
     await loadPreviewPage(entry, 0)
+    void loadRelated(entry)
     if (!autoEditRef.current || entry.type === 'directory') return
     await enterEditMode()
   }
@@ -1187,13 +1246,54 @@ function Panel(props: {
               <button type="button" className={C('dshwe-pager-btn')} disabled={preview.page === 0 || preview.loading} onClick={previewPrev} title={tr('preview.prev')} aria-label={tr('preview.prev')}>‹</button>
               <button type="button" className={C('dshwe-pager-btn')} disabled={d?.hasMore !== true || preview.loading} onClick={previewNext} title={tr('preview.next')} aria-label={tr('preview.next')}>›</button>
               {canEdit ? <button type="button" className={C('dshwe-prevbtn')} onClick={() => void enterEditMode()}>{tr('edit')}</button> : null}
-              <button type="button" className={C('dshwe-icobtn')} onClick={() => setPreview(null)} title={tr('close.preview')} aria-label={tr('close.preview')}>
+              <button type="button" className={C('dshwe-icobtn')} onClick={() => { setPreview(null); setRelated(null) }} title={tr('close.preview')} aria-label={tr('close.preview')}>
                 <svg viewBox="0 0 16 16" width={13} height={13} aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" /></svg>
               </button>
             </>
           )}
         </div>
         {contentArea}
+        {related !== null && !isEdit ? (
+          <div className={C('dshwe-rel')}>
+            <div className={C('dshwe-rel-head')}>
+              <button type="button" className={C('dshwe-rel-toggle')} title={tr('related.tip')}
+                onClick={() => setRelated((prev) => (prev === null ? prev : { ...prev, open: !prev.open }))}>
+                <span className={C('dshwe-rel-caret')}>{related.open ? '▾' : '▸'}</span>
+                <span className={C('dshwe-rel-title')}>
+                  {related.loading
+                    ? tr('related.loading')
+                    : related.error !== null
+                      ? `${tr('related.fail')}: ${related.error}`
+                      : relatedCount() === 0
+                        ? tr('related.none')
+                        : tr('related.title', { n: relatedCount() })}
+                </span>
+              </button>
+              {related.data !== null && related.sel.size > 0 ? (
+                <>
+                  <button type="button" className={C('dshwe-prevbtn')} onClick={insertRelated}>{tr('related.insert', { n: related.sel.size })}</button>
+                  <button type="button" className={C('dshwe-rel-clear')} onClick={() => setRelated((prev) => (prev === null ? prev : { ...prev, sel: new Set() }))}>{tr('related.clear')}</button>
+                </>
+              ) : null}
+            </div>
+            {related.open && related.data !== null ? (
+              <div className={C('dshwe-rel-list')}>
+                {(related.data.groups ?? []).map((g) => (
+                  <div key={g.kind} className={C('dshwe-rel-group')}>
+                    <div className={C('dshwe-rel-glabel')}>{g.label}</div>
+                    {g.items.map((it) => (
+                      <div key={it.rel} className={C('dshwe-rel-item')} title={`${it.rel}\n${it.reason}`}>
+                        <input type="checkbox" className={C('dshwe-rel-check')} checked={related.sel.has(it.rel)} onChange={() => toggleRelated(it.rel)} />
+                        <button type="button" className={C('dshwe-rel-name')} onClick={() => void openPreview({ name: it.name, type: 'file', path: `${(root ?? '').replace(/\/+$/, '')}/${it.rel}`, rel: it.rel, size: null })}>{it.rel}</button>
+                        <span className={C('dshwe-rel-reason')}>{it.reason}</span>
+                      </div>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
         {!isEdit ? (
           <div className={C('dshwe-preview-actions')}>
             <button type="button" className={C('dshwe-prevbtn')} onClick={() => insertMarker(preview.entry)}>{tr('btn.ref')}</button>

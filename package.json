@@ -1,6 +1,6 @@
 {
   "name": "dsh-workspace-explorer",
-  "version": "0.10.1-fork.1",
+  "version": "0.11.0-fork.1",
   "description": "DeepSeek Harness 宸ヤ綔鍖烘枃浠惰祫婧愮鐞嗗櫒(鍘熺敓鎻掍欢):鍙充晶闈㈡澘灞曠ず宸ヤ綔鍖虹洰褰曟爲,鐐瑰嚮/鎷栨嫿鎻掑叆鏂囦欢寮曠敤,鍚悳绱?棰勮/鍥介檯鍖?| Native DSH plugin: workspace file-tree panel with click/drag references, search, preview, i18n.",
   "license": "MIT",
   "type": "module",

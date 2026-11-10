@@ -35,6 +35,269 @@ export interface WsHttpResponse {
   end(body?: string | Uint8Array): void
 }
 
+/* ------------------------------------------------ 关联文件(改一处别忘了别处) */
+
+/** 关联文件所属分组。 */
+export interface RelatedGroup {
+  kind: 'imports' | 'importedBy' | 'twin' | 'similar'
+  label: string
+  items: Array<{ rel: string; name: string; reason: string; score: number }>
+}
+
+/** 关联分析结果。 */
+export interface RelatedResult {
+  ok: boolean
+  error?: string
+  target: string
+  groups: RelatedGroup[]
+  scanned: number
+  cached: boolean
+}
+
+/** 单个文件的索引条目(import 候选 + 样式类名 token)。 */
+interface FileFacts {
+  rel: string
+  name: string
+  /** import / require / @import 解析出的候选 rel(不做存在性校验,纯字符串比对) */
+  refs: Set<string>
+  /** 样式类名 token(跨文件重复得多的,往往就是「同样的东西在别处」) */
+  tokens: Set<string>
+}
+
+interface FactIndex {
+  at: number
+  root: string
+  files: Map<string, FileFacts>
+  byRef: Map<string, string[]>
+  byToken: Map<string, string[]>
+}
+
+const RELATED_INDEX_TTL = 30_000
+const RELATED_MAX_FILES = 3000
+const RELATED_MAX_BYTES = 256 * 1024
+const RELATED_FILE_EXT = /\.(vue|tsx?|jsx?|mjs|cjs|scss|less|css|wxml|wxss)$/i
+/** 关联分析额外跳过的目录(与树视图的噪声目录分开,免得改到列表行为) */
+const RELATED_EXTRA_IGNORED = new Set(['tmp', 'out', '.output', '.turbo', '.cache', '.dsh'])
+/** 只在样式区里取类名,免得 JS 的 `.push` `.log` 被当成类名 */
+const RELATED_STYLE_EXT = /\.(css|scss|less|wxss)$/i
+const RELATED_STYLE_BLOCK = /<style[^>]*>([\s\S]*?)<\/style>/gi
+/** 一行里出现这些关键字,才把它当作「引用声明行」去取引号里的路径 */
+const RELATED_MODULE_LINE = /\b(?:import|export|require|@import|@use|@forward|url)\b/
+const RELATED_QUOTED = /['"`]([^'"`\n]{1,200})['"`]/g
+/** 样式类名:`.foo-bar` 这种(CSS 里的选择器) */
+const RELATED_CLASS_TOKEN = /\.([a-zA-Z_][\w-]{2,40})/g
+
+const relatedIndex = new Map<string, FactIndex>()
+
+/** 把引用的 specifier 展开成「可能是哪个 rel」的候选串(不做 IO)。 */
+function specifierCandidates(rel: string, spec: string): string[] {
+  const clean = spec.split('?')[0]!.trim()
+  if (clean === '' || /\s/.test(clean)) return []
+  const exts = ['', '.vue', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.json', '.scss', '.less', '.css']
+  const indexes = ['', '/index.vue', '/index.ts', '/index.tsx', '/index.js', '/index.jsx']
+  const bases: string[] = []
+  const dir = rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : ''
+  const norm = (p: string): string => {
+    const out: string[] = []
+    for (const seg of p.split('/')) {
+      if (seg === '' || seg === '.') continue
+      if (seg === '..') out.pop()
+      else out.push(seg)
+    }
+    return out.join('/')
+  }
+  if (clean.startsWith('.')) bases.push(norm(dir === '' ? clean : `${dir}/${clean}`))
+  else {
+    // 别名:@/ ~/ src/ 都视为「项目根或 src 下」
+    const stripped = clean.replace(/^[@~]\//, '').replace(/^@/, '')
+    bases.push(norm(stripped), norm(`src/${stripped}`))
+  }
+  const out: string[] = []
+  for (const base of bases) {
+    if (base === '') continue
+    for (const idx of indexes) for (const ext of exts) out.push(base + idx + ext)
+  }
+  return out
+}
+
+/** 从一段源码里抽引用候选与样式类名。 */
+function fileFacts(rel: string, name: string, text: string): FileFacts {
+  const refs = new Set<string>()
+  const tokens = new Set<string>()
+  const lines = text.split('\n')
+  for (const line of lines) {
+    if (line.length > 400) continue
+    if (!RELATED_MODULE_LINE.test(line)) continue
+    RELATED_QUOTED.lastIndex = 0
+    let m: RegExpExecArray | null
+    while ((m = RELATED_QUOTED.exec(line)) !== null) {
+      for (const cand of specifierCandidates(rel, m[1]!)) refs.add(cand)
+    }
+  }
+  // 样式区:css/scss/less/wxss 整文件,vue 取所有 <style> 块,其它(纯 JS/TS)不取类名
+  let styleText = ''
+  if (RELATED_STYLE_EXT.test(name)) styleText = text
+  else if (/\.vue$/i.test(name)) {
+    RELATED_STYLE_BLOCK.lastIndex = 0
+    let s: RegExpExecArray | null
+    while ((s = RELATED_STYLE_BLOCK.exec(text)) !== null) styleText += `\n${s[1]!}`
+  }
+  if (styleText !== '') {
+    RELATED_CLASS_TOKEN.lastIndex = 0
+    let t: RegExpExecArray | null
+    while ((t = RELATED_CLASS_TOKEN.exec(styleText)) !== null) {
+      const tok = t[1]!
+      if (/^\d/.test(tok)) continue      // 0.5 / 1.5 这类小数
+      tokens.add(tok)
+    }
+  }
+  return { rel, name, refs, tokens }
+}
+
+/** 建/复用整个工作区的索引(30s TTL;有变化就重建)。 */
+async function relatedFacts(root: string): Promise<FactIndex> {
+  const hit = relatedIndex.get(root)
+  if (hit !== undefined && Date.now() - hit.at < RELATED_INDEX_TTL) return hit
+  const files = new Map<string, FileFacts>()
+  let scanned = 0
+  const walk = async (abs: string, rel: string): Promise<void> => {
+    if (scanned >= RELATED_MAX_FILES) return
+    let dirents: Dirent<string>[]
+    try { dirents = await readdir(abs, { withFileTypes: true }) } catch { return }
+    for (const d of dirents) {
+      if (scanned >= RELATED_MAX_FILES) return
+      if (d.name === '.DS_Store') continue
+      const childAbs = join(abs, d.name)
+      const childRel = rel === '' ? d.name : `${rel}/${d.name}`
+      if (d.isDirectory()) {
+        if (cfg.ignore.includes(d.name) || SEARCH_ALWAYS_IGNORED.has(d.name) || RELATED_EXTRA_IGNORED.has(d.name)) continue
+        await walk(childAbs, childRel)
+        continue
+      }
+      if (!RELATED_FILE_EXT.test(d.name)) continue
+      scanned++
+      try {
+        const info = await stat(childAbs)
+        if (!info.isFile() || info.size === 0 || info.size > RELATED_MAX_BYTES) continue
+        if (await sniffBinary(childAbs, info.size)) continue
+        files.set(childRel, fileFacts(childRel, d.name, (await readFile(childAbs)).toString('utf-8')))
+      } catch { /* 读不到就跳过 */ }
+    }
+  }
+  await walk(root.replace(/\/+$/, ''), '')
+  const byRef = new Map<string, string[]>()
+  const byToken = new Map<string, string[]>()
+  for (const f of files.values()) {
+    for (const r of f.refs) {
+      const list = byRef.get(r)
+      if (list === undefined) byRef.set(r, [f.rel])
+      else list.push(f.rel)
+    }
+    for (const t of f.tokens) {
+      const list = byToken.get(t)
+      if (list === undefined) byToken.set(t, [f.rel])
+      else list.push(f.rel)
+    }
+  }
+  const index: FactIndex = { at: Date.now(), root, files, byRef, byToken }
+  relatedIndex.set(root, index)
+  return index
+}
+
+/** @internal 找出「改这个文件时别处也可能要跟着改」的文件。 */
+export async function relatedFiles(root: string, rel: string): Promise<RelatedResult> {
+  const resolved = resolveRel(root, rel)
+  if ('error' in resolved) return { ok: false, error: resolved.error, target: rel, groups: [], scanned: 0, cached: false }
+  const index = await relatedFacts(root)
+  const target = index.files.get(rel)
+  if (target === undefined) return { ok: false, error: 'not-indexed', target: rel, groups: [], scanned: index.files.size, cached: true }
+  const name = (r: string): string => r.includes('/') ? r.slice(r.lastIndexOf('/') + 1) : r
+
+  // 1) 它引用了谁
+  const imports: RelatedGroup['items'] = []
+  // 2) 谁引用了它
+  const importedBy: RelatedGroup['items'] = []
+  for (const f of index.files.values()) {
+    if (f.rel === rel) continue
+    for (const r of f.refs) {
+      if (r === rel) { importedBy.push({ rel: f.rel, name: name(f.rel), reason: 'import 了这个文件', score: 100 }); break }
+    }
+    if (target.refs.has(f.rel)) imports.push({ rel: f.rel, name: name(f.rel), reason: '本文件 import 了它', score: 100 })
+  }
+
+  // 3) 同构文件:同名(非 index.*)或「父目录同名 + 同名文件」
+  const targetParent = rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : ''
+  const targetParentName = targetParent.includes('/') ? targetParent.slice(targetParent.lastIndexOf('/') + 1) : targetParent
+  const twins: RelatedGroup['items'] = []
+  for (const f of index.files.values()) {
+    if (f.rel === rel) continue
+    const base = name(f.rel)
+    if (base === name(rel) && !/^index\./i.test(base)) {
+      twins.push({ rel: f.rel, name: base, reason: '同名文件(往往是同一类页面的两处实现)', score: 80 })
+      continue
+    }
+    const parent = f.rel.includes('/') ? f.rel.slice(0, f.rel.lastIndexOf('/')) : ''
+    const parentName = parent.includes('/') ? parent.slice(parent.lastIndexOf('/') + 1) : parent
+    if (targetParentName !== '' && parentName === targetParentName && base === name(rel)) {
+      twins.push({ rel: f.rel, name: base, reason: '同目录同名的兄弟文件', score: 70 })
+    }
+  }
+
+  // 4) 内容相似:共享的样式类名越多,越可能是「同一套东西抄了两份」
+  const similar: RelatedGroup['items'] = []
+  if (target.tokens.size > 0) {
+    const shared = new Map<string, string[]>()
+    for (const tok of target.tokens) {
+      const owners = index.byToken.get(tok)
+      if (owners === undefined || owners.length < 2) continue
+      for (const owner of owners) {
+        if (owner === rel) continue
+        const list = shared.get(owner)
+        if (list === undefined) shared.set(owner, [tok])
+        else list.push(tok)
+      }
+    }
+    for (const [owner, toks] of shared) {
+      // 至少共享 3 个类名才算「像」,免得满屏 1 个公共类名的噪声
+      if (toks.length < 3) continue
+      similar.push({
+        rel: owner,
+        name: name(owner),
+        reason: `共享样式类名:${toks.slice(0, 3).map((t) => '.' + t).join(' ')}${toks.length > 3 ? ` 等 ${toks.length} 个` : ''}`,
+        score: Math.min(95, 40 + toks.length * 5),
+      })
+    }
+  }
+
+  const dedupe = (items: RelatedGroup['items']): RelatedGroup['items'] => {
+    const seen = new Set<string>()
+    const out: RelatedGroup['items'] = []
+    for (const it of items.sort((a, b) => b.score - a.score)) {
+      if (seen.has(it.rel)) continue
+      seen.add(it.rel)
+      out.push(it)
+    }
+    return out.slice(0, 30)
+  }
+  // 同一个文件可能既被 import 又内容相似,按「更有说服力的理由」去重
+  const used = new Set<string>()
+  const take = (items: RelatedGroup['items']): RelatedGroup['items'] =>
+    dedupe(items).filter((it) => {
+      if (used.has(it.rel)) return false
+      used.add(it.rel)
+      return true
+    })
+
+  const groups: RelatedGroup[] = ([
+    { kind: 'importedBy', label: '谁引用了它', items: take(importedBy) },
+    { kind: 'imports', label: '它引用了谁', items: take(imports) },
+    { kind: 'twin', label: '同构文件', items: take(twins) },
+    { kind: 'similar', label: '内容相似(可能也有一份要改)', items: take(similar) },
+  ] as RelatedGroup[]).filter((g) => g.items.length > 0)
+
+  return { ok: true, target: rel, groups, scanned: index.files.size, cached: false }
+}
+
 /** 一行目录条目。 */
 export interface WsEntry {
   name: string
@@ -503,6 +766,15 @@ export default {
         handler: async (req, res) => {
           const body = await readJsonBody(req)
           const result = await searchContent(String(body.root ?? ''), String(body.q ?? body.query ?? ''))
+          return writeJson(res, result)
+        },
+      },
+      {
+        kind: 'exact',
+        path: '/dsh-we/api/related',
+        handler: async (req, res) => {
+          const body = await readJsonBody(req)
+          const result = await relatedFiles(String(body.root ?? ''), String(body.rel ?? ''))
           return writeJson(res, result)
         },
       },

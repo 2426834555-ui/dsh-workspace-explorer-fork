@@ -1,5 +1,10 @@
 # dsh-workspace-explorer
 
+> **这是个人 fork，安装与改动说明见 [FORK.md](FORK.md)** —— 包名为 `dsh-workspace-explorer`，
+> 需先 `npm install --legacy-peer-deps && npm run build`，再链接进 DSH profile。
+> 下面是上游原版 README。
+
+
 **[English](README.md)** | [中文](README.zh.md)
 
 [![License](https://img.shields.io/github/license/Jiyr0119/dsh-workspace-explorer)](LICENSE)

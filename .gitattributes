@@ -1,0 +1,13 @@
+# 统一换行:任何机器(Windows/macOS/Linux)clone 出来的文件字节完全一致
+* text=auto eol=lf
+
+# 二进制资源不做换行转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.zip binary
